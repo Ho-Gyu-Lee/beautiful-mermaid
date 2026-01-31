@@ -34,7 +34,8 @@ interface TestCase {
  */
 function parseTestCase(content: string): TestCase {
   const tc: TestCase = { mermaid: '', expected: '', paddingX: 5, paddingY: 5 }
-  const lines = content.split('\n')
+  // Normalize CRLF to LF for Windows compatibility
+  const lines = content.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')
   const paddingRegex = /^(?:padding([xy]))\s*=\s*(\d+)\s*$/i
 
   let inMermaid = true
