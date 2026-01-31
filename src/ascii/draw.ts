@@ -14,7 +14,7 @@ import {
   Up, Down, Left, Right, UpperLeft, UpperRight, LowerLeft, LowerRight, Middle,
   drawingCoordEquals,
 } from './types.ts'
-import { mkCanvas, copyCanvas, getCanvasSize, mergeCanvases, drawText, increaseSize } from './canvas.ts'
+import { mkCanvas, copyCanvas, getCanvasSize, mergeCanvases, drawText, increaseSize, isJunctionChar } from './canvas.ts'
 import { determineDirection, dirEquals } from './edge-routing.ts'
 import { gridToDrawingCoord, lineToDrawing } from './grid.ts'
 import { isFullWidth, getDisplayWidth } from '../styles.ts'
@@ -293,7 +293,10 @@ export function drawArrow(
 
   const labelCanvas = drawArrowLabel(graph, edge)
   const [pathCanvas, linesDrawn, lineDirs] = drawPath(graph, edge.path)
-  const boxStartCanvas = drawBoxStart(graph, edge.path, linesDrawn[0]!)
+  // Skip box start junction for edges with labels to avoid ├label┤ artifacts
+  const boxStartCanvas = edge.text.length > 0
+    ? copyCanvas(graph.canvas)
+    : drawBoxStart(graph, edge.path, linesDrawn[0]!)
   const arrowHeadCanvas = drawArrowHead(
     graph,
     linesDrawn[linesDrawn.length - 1]!,
@@ -465,6 +468,33 @@ function drawArrowLabel(graph: AsciiGraph, edge: AsciiEdge): Canvas {
   if (edge.text.length === 0) return canvas
 
   const drawingLine = lineToDrawing(graph, edge.labelLine)
+
+  // Fill the label line segment with line characters, extending 1 char on each side
+  // This ensures junction characters (├, ┤, etc.) around the label are overwritten
+  if (drawingLine.length >= 2) {
+    const minX = Math.min(drawingLine[0]!.x, drawingLine[1]!.x)
+    const maxX = Math.max(drawingLine[0]!.x, drawingLine[1]!.x)
+    const minY = Math.min(drawingLine[0]!.y, drawingLine[1]!.y)
+    const maxY = Math.max(drawingLine[0]!.y, drawingLine[1]!.y)
+    const isHorizontal = minY === maxY
+    const lineChar = isHorizontal ? '─' : '│'
+
+    // Extend fill range by 1 on each side to cover junction artifacts
+    if (isHorizontal) {
+      const extendedMinX = Math.max(0, minX - 1)
+      const extendedMaxX = maxX + 1
+      for (let x = extendedMinX; x <= extendedMaxX; x++) {
+        if (canvas[x]) canvas[x]![minY] = lineChar
+      }
+    } else {
+      const extendedMinY = Math.max(0, minY - 1)
+      const extendedMaxY = maxY + 1
+      for (let y = extendedMinY; y <= extendedMaxY; y++) {
+        if (canvas[minX]) canvas[minX]![y] = lineChar
+      }
+    }
+  }
+
   drawTextOnLine(canvas, drawingLine, edge.text)
   return canvas
 }
@@ -621,7 +651,119 @@ export function drawGraph(graph: AsciiGraph): Canvas {
   graph.canvas = mergeCanvases(graph.canvas, zero, useAscii, ...cornerCanvases)
   graph.canvas = mergeCanvases(graph.canvas, zero, useAscii, ...arrowHeadCanvases)
   graph.canvas = mergeCanvases(graph.canvas, zero, useAscii, ...boxStartCanvases)
-  graph.canvas = mergeCanvases(graph.canvas, zero, useAscii, ...labelCanvases)
+
+  // Draw edge labels directly on canvas (not merged) to avoid junction artifacts
+  for (const edge of graph.edges) {
+    if (edge.text.length === 0) continue
+    const drawingLine = lineToDrawing(graph, edge.labelLine)
+    if (drawingLine.length >= 2) {
+      const minX = Math.min(drawingLine[0]!.x, drawingLine[1]!.x)
+      const maxX = Math.max(drawingLine[0]!.x, drawingLine[1]!.x)
+      const minY = Math.min(drawingLine[0]!.y, drawingLine[1]!.y)
+      const maxY = Math.max(drawingLine[0]!.y, drawingLine[1]!.y)
+      const isHorizontal = minY === maxY
+
+      // Calculate label position and clear extended area to remove junction artifacts
+      const labelWidth = getDisplayWidth(edge.text)
+      const middleX = minX + Math.floor((maxX - minX) / 2)
+      const middleY = minY + Math.floor((maxY - minY) / 2)
+      const labelStartX = middleX - Math.floor((labelWidth - 1) / 2)
+      const labelEndX = labelStartX + labelWidth - 1
+
+      // Find boundary position and handle label positioning
+      let actualLabelStartX = labelStartX
+      let actualLabelEndX = labelEndX
+
+      if (isHorizontal) {
+        // Find boundary position (┤ or similar)
+        let boundaryX = -1
+        for (let x = labelEndX + 1; x <= maxX + 10; x++) {
+          if (!graph.canvas[x]) break
+          const current = graph.canvas[x]![middleY]
+          if (current === '┤' || current === '┘' || current === '┐') {
+            boundaryX = x
+            break
+          } else if (current === '│') {
+            break
+          }
+        }
+
+        // If boundary is right next to label, shift label left to make room for ─
+        if (boundaryX === labelEndX + 1) {
+          actualLabelStartX = labelStartX - 1
+          actualLabelEndX = labelEndX - 1
+        }
+
+        // Fill spaces from label end to boundary with ─
+        if (boundaryX > actualLabelEndX + 1) {
+          for (let x = actualLabelEndX + 1; x < boundaryX; x++) {
+            if (graph.canvas[x] && graph.canvas[x]![middleY] === ' ') {
+              graph.canvas[x]![middleY] = '─'
+            }
+          }
+        }
+
+        // If boundary exists and is close, ensure there's a ─ before it
+        if (boundaryX > 0 && boundaryX <= actualLabelEndX + 2) {
+          if (graph.canvas[boundaryX - 1]) {
+            graph.canvas[boundaryX - 1]![middleY] = '─'
+          }
+        }
+      } else {
+        let boundaryY = -1
+        for (let y = middleY + Math.floor(labelWidth / 2) + 1; y <= maxY + 10; y++) {
+          if (!graph.canvas[middleX]) break
+          const current = graph.canvas[middleX]![y]
+          if (current === '┴' || current === '┘' || current === '└') {
+            boundaryY = y
+            break
+          } else if (current === '─') {
+            break
+          }
+        }
+        if (boundaryY > middleY + Math.floor(labelWidth / 2) + 1) {
+          for (let y = middleY + Math.floor(labelWidth / 2) + 1; y < boundaryY; y++) {
+            if (graph.canvas[middleX] && graph.canvas[middleX]![y] === ' ') {
+              graph.canvas[middleX]![y] = '│'
+            }
+          }
+        }
+      }
+
+      // Clear junction artifacts BEFORE label (├, ┼ → space)
+      if (isHorizontal) {
+        for (let x = actualLabelStartX - 1; x >= minX; x--) {
+          if (graph.canvas[x]) {
+            const current = graph.canvas[x]![middleY]
+            if (current === '├' || current === '┼') {
+              graph.canvas[x]![middleY] = ' '
+            } else if (current !== ' ' && current !== '─') {
+              break
+            }
+          }
+        }
+      } else {
+        for (let y = middleY - Math.floor(labelWidth / 2) - 1; y >= minY; y--) {
+          if (graph.canvas[middleX]) {
+            const current = graph.canvas[middleX]![y]
+            if (current === '┬' || current === '┼') {
+              graph.canvas[middleX]![y] = ' '
+            } else if (current !== ' ' && current !== '│') {
+              break
+            }
+          }
+        }
+      }
+
+      // Draw the label text at adjusted position
+      if (isHorizontal && actualLabelStartX !== labelStartX) {
+        // Draw at adjusted position
+        drawText(graph.canvas, { x: actualLabelStartX, y: middleY }, edge.text)
+      } else {
+        drawTextOnLine(graph.canvas, drawingLine, edge.text)
+      }
+    }
+  }
 
   // Draw subgraph labels last (on top)
   for (const sg of graph.subgraphs) {
